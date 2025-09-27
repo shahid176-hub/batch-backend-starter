@@ -1,0 +1,96 @@
+version: "3.9"
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./.vol/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mc:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+    command: >
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minio} $${MINIO_ROOT_PASSWORD:-minio123} &&
+      mc mb -p local/lake || true &&
+      mc mb -p local/lake/raw || true &&
+      mc mb -p local/lake/processed || true &&
+      mc mb -p local/lake/exports || true &&
+      sleep 3600
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpass}
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.vol/pg:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+
+  airflow:
+    image: apache/airflow:2.9.2
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: "50000"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
+      S3_ENDPOINT: "http://minio:9000"
+    user: "50000:0"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: >
+      bash -c "
+        airflow db init &&
+        airflow users create --username admin --password admin --firstname admin --lastname user --role Admin --email admin@example.com &&
+        airflow webserver -p 8080 &
+        airflow scheduler
+      "
+    depends_on: [minio, mc]
+
+  spark:
+    image: bitnami/spark:3.5
+    environment:
+      SPARK_MODE: "client"
+      SPARK_USER: "root"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
+      S3A_ENDPOINT: "http://minio:9000"
+      S3_PATH_STYLE_ACCESS: "true"
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs
+      - ./spark/jars:/opt/spark/jars
+    depends_on: [minio, postgres]
+
+  delivery:
+    image: tiangolo/uvicorn-gunicorn-fastapi:python3.11
+    volumes:
+      - ./delivery:/app
+    environment:
+      - MODULE_NAME=app
+      - VARIABLE_NAME=app
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-warehouse}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgpass}
+    ports:
+      - "8000:80"
+    depends_on: [postgres]

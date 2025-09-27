@@ -1,8 +1,11 @@
-﻿airflow/dags/_data/
+﻿# data lake & artifacts
+airflow/dags/_data/
 airflow/logs/
 **/*.csv
 **/*.parquet
 **/*.json
+
+# env & caches
 .env
 __pycache__/
 *.log
